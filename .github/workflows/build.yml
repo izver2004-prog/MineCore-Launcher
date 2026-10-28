@@ -1,0 +1,100 @@
+name: Build MineCore
+
+on:
+  push:
+    paths: ['*.zip', '.github/workflows/build.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Распаковать zip с ресурсами лаунчера
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path . -Filter *.zip -File | Select-Object -First 1
+          if (-not $zip) { throw 'В корне репозитория нет .zip файла с ресурсами лаунчера' }
+          Write-Host "Архив: $($zip.Name)"
+          if (Test-Path _src) { Remove-Item _src -Recurse -Force }
+          Expand-Archive -Path $zip.FullName -DestinationPath _src -Force
+          $root = (Resolve-Path _src).Path
+          if (-not (Test-Path (Join-Path $root 'package.json'))) {
+            $d = Get-ChildItem _src -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'package.json') } | Select-Object -First 1
+            if (-not $d) { throw 'В архиве не найден package.json' }
+            $root = $d.FullName
+          }
+          "APP_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Ключ CurseForge (необязательно)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          CF_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+        run: |
+          if ($env:CF_KEY) {
+            @{ cfKey = $env:CF_KEY } | ConvertTo-Json | Out-File -FilePath src/secrets.json -Encoding utf8
+            Write-Host 'Ключ CurseForge добавлен'
+          } else { Write-Host 'CURSEFORGE_API_KEY не задан — пользователь введёт ключ в настройках' }
+
+      - name: Цифровая подпись wwwakizashi
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+          if ($env:SIGN_PFX_BASE64) {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+            $pass = $env:SIGN_PFX_PASSWORD
+            Write-Host 'Используется ваш сертификат из секретов'
+          } else {
+            $pass = [guid]::NewGuid().ToString('N')
+            Write-Output "::add-mask::$pass"
+            $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=wwwakizashi' -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(5)
+            Export-PfxCertificate -Cert $cert -FilePath $pfx -Password (ConvertTo-SecureString $pass -AsPlainText -Force) | Out-Null
+            New-Item -ItemType Directory -Force -Path dist | Out-Null
+            Export-Certificate -Cert $cert -FilePath dist/wwwakizashi.cer | Out-Null
+            Write-Host 'Создан самоподписанный сертификат CN=wwwakizashi'
+          }
+          "CSC_LINK=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CSC_KEY_PASSWORD=$pass" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Установить зависимости
+        working-directory: ${{ env.APP_DIR }}
+        run: npm install --no-audit --no-fund
+
+      - name: Собрать exe
+        working-directory: ${{ env.APP_DIR }}
+        run: npx electron-builder --win --publish never
+
+      - name: Проверить подпись
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          Get-ChildItem dist -Filter *.exe | ForEach-Object {
+            $s = Get-AuthenticodeSignature $_.FullName
+            Write-Host "$($_.Name): $($s.SignerCertificate.Subject) [$($s.Status)]"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MineCore-windows
+          path: |
+            ${{ env.APP_DIR }}/dist/*.exe
+            ${{ env.APP_DIR }}/dist/*.cer
+
+      - name: Релиз (при теге v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.APP_DIR }}/dist/*.exe
