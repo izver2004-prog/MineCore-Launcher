@@ -34,17 +34,6 @@ jobs:
           }
           "APP_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Ключ CurseForge (необязательно)
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        env:
-          CF_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
-        run: |
-          if ($env:CF_KEY) {
-            @{ cfKey = $env:CF_KEY } | ConvertTo-Json | Out-File -FilePath src/secrets.json -Encoding utf8
-            Write-Host 'Ключ CurseForge добавлен'
-          } else { Write-Host 'CURSEFORGE_API_KEY не задан — пользователь введёт ключ в настройках' }
-
       - name: Цифровая подпись wwwakizashi
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
